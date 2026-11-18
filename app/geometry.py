@@ -129,8 +129,9 @@ def validate_submission(
 def _make_point(lon: Any, lat: Any) -> Point:
     try:
         point = Point(float(lon), float(lat))
-    except (TypeError, ValueError) as exc:
-        raise GeometryError(f"观测点坐标必须是数字，收到 {lon!r}, {lat!r}") from exc
+    except (TypeError, ValueError, OverflowError) as exc:
+        # OverflowError：整数坐标超出双精度可表示范围
+        raise GeometryError(f"观测点坐标必须是可表示的数值，收到 {lon!r}, {lat!r}") from exc
     if not point.is_valid:
         raise GeometryError("观测点不是合法的点几何")
     return point

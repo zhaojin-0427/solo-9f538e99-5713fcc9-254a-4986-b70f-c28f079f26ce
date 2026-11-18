@@ -81,3 +81,72 @@ class VersionInfo(BaseModel):
     expected_version: int | None
     published_at: str
     grid_count: int
+
+
+# ---------- 观测站对账 ----------
+
+Side = Literal["left", "right"]
+
+
+class StationIn(BaseModel):
+    station_id: str = Field(..., min_length=1, max_length=128, description="名录内唯一站点编号")
+    x: int = Field(..., strict=True, description="平面坐标 x（整数）")
+    y: int = Field(..., strict=True, description="平面坐标 y（整数）")
+
+
+class ReconcileRequest(BaseModel):
+    version: int | None = Field(
+        None, ge=1, description="固定使用的网格版号；不传或 null 表示受理时的当前版"
+    )
+    radius: int = Field(..., ge=1, strict=True, description="正整数匹配半径；距离不超过半径才可配对")
+    left: list[StationIn] = Field(..., min_length=1, max_length=10, description="左侧名录，1～10 个站点")
+    right: list[StationIn] = Field(..., min_length=1, max_length=10, description="右侧名录，1～10 个站点")
+
+
+class CertainPair(BaseModel):
+    left_id: str
+    right_id: str
+    grid_id: str = Field(..., description="两点共同所在的网格（同版）")
+    distance_squared: int
+
+
+class StationOptions(BaseModel):
+    side: Side
+    station_id: str
+    grid_id: str
+    possible_partners: list[str] = Field(
+        default_factory=list, description="全部最优方案中出现过的对端（可能为空）"
+    )
+    possible_unmatched: bool = Field(
+        ..., description="是否存在某个最优方案使该站点未配对"
+    )
+
+
+class PendingStation(BaseModel):
+    side: Side
+    station_id: str
+    x: int
+    y: int
+    status: Literal["boundary", "outside"] = Field(
+        ..., description="边界（待判）或流域外；这类点不参与配对"
+    )
+    grid_ids: list[str] = Field(default_factory=list, description="边界点相接的全部网格")
+
+
+class ReconcileResponse(BaseModel):
+    version: int = Field(..., description="本次对账实际使用的版号，所有点均按该版判定")
+    is_current: bool
+    radius: int
+    max_pairs: int = Field(..., description="一对一配对数的最大值")
+    min_total_squared_distance: int = Field(
+        ..., description="在最大配对数前提下，平方距离总和的最小值"
+    )
+    certain_pairs: list[CertainPair] = Field(
+        default_factory=list, description="在全部最优方案中都必然成立的站点对"
+    )
+    station_options: list[StationOptions] = Field(
+        default_factory=list, description="每个可参与配对的站点在各最优方案中的可能结论"
+    )
+    pending: list[PendingStation] = Field(
+        default_factory=list, description="边界 / 域外点，单列待核，不参与配对"
+    )

@@ -1,4 +1,4 @@
-"""FastAPI 入口：流域网格发布与观测点批量查询。"""
+"""FastAPI 入口：流域网格发布、观测点批量查询与观测站对账。"""
 from __future__ import annotations
 
 from fastapi import FastAPI, Request
@@ -7,12 +7,15 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from .config import settings
 from .db import Database, VersionConflict, VersionNotFound
 from .geometry import GeometryError, classify_point, parse_surface, validate_submission
+from .reconcile import reconcile_stations
 from .schemas import (
     PointResult,
     PublishRequest,
     PublishResponse,
     QueryRequest,
     QueryResponse,
+    ReconcileRequest,
+    ReconcileResponse,
     VersionInfo,
 )
 
@@ -20,9 +23,10 @@ app = FastAPI(
     title="流域防汛网格服务",
     description=(
         "提交流域多边形与整版网格（互不重叠且恰好覆盖流域），按所见版号乐观锁发布；"
-        "观测点按固定版号批量落格，旧版持久保留可查。"
+        "观测点按固定版号批量落格，旧版持久保留可查；"
+        "两套观测站名录按同版同格与半径做一对一最优对账。"
     ),
-    version="1.0.0",
+    version="1.1.0",
 )
 
 db = Database(settings.database_path)
@@ -118,15 +122,10 @@ async def publish(req: PublishRequest) -> JSONResponse | PublishResponse:
     responses={404: {"model": dict, "description": "指定版本不存在或尚无已发布版本"}},
 )
 async def query(req: QueryRequest) -> JSONResponse | QueryResponse:
-    current = db.current_version()
-    if req.version is None:
-        if current is None:
-            return _error(404, "NO_PUBLISHED_VERSION", "尚无已发布版本，请先调用 /publish")
-        version = current
-    else:
-        version = req.version
-        if not any(v["version"] == version for v in db.list_versions()):
-            return _error(404, "VERSION_NOT_FOUND", f"版本 {version} 不存在")
+    resolved = _resolve_version(req.version)
+    if isinstance(resolved, JSONResponse):
+        return resolved
+    version, current = resolved
 
     watershed, grids = db.load_snapshot(version)
     diag = max(watershed.bounds[2] - watershed.bounds[0],
@@ -148,3 +147,68 @@ async def query(req: QueryRequest) -> JSONResponse | QueryResponse:
         )
 
     return QueryResponse(version=version, is_current=(version == current), results=results)
+
+
+def _resolve_version(requested: int | None) -> tuple[int, int | None] | JSONResponse:
+    """确定本次请求唯一使用的版号；不传时锁定受理时刻的当前版。"""
+    current = db.current_version()
+    if requested is None:
+        if current is None:
+            return _error(404, "NO_PUBLISHED_VERSION", "尚无已发布版本，请先调用 /publish")
+        return current, current
+    if not any(v["version"] == requested for v in db.list_versions()):
+        return _error(404, "VERSION_NOT_FOUND", f"版本 {requested} 不存在")
+    return requested, current
+
+
+@app.post(
+    "/reconcile",
+    response_model=ReconcileResponse,
+    tags=["对账"],
+    responses={
+        404: {"model": dict, "description": "指定版本不存在或尚无已发布版本"},
+        422: {"model": dict, "description": "站点编号重复"},
+    },
+)
+async def reconcile(req: ReconcileRequest) -> JSONResponse | ReconcileResponse:
+    # 1) 编号在各自名录内唯一
+    for label, stations in (("左侧", req.left), ("右侧", req.right)):
+        seen: set[str] = set()
+        duplicates: list[str] = []
+        for station in stations:
+            if station.station_id in seen and station.station_id not in duplicates:
+                duplicates.append(station.station_id)
+            seen.add(station.station_id)
+        if duplicates:
+            return _error(
+                422,
+                "DUPLICATE_STATION_ID",
+                f"{label}名录站点编号必须唯一，重复编号：{', '.join(duplicates)}",
+            )
+
+    # 2) 一次对账只解析一次版号，所有站点固定使用同版网格
+    resolved = _resolve_version(req.version)
+    if isinstance(resolved, JSONResponse):
+        return resolved
+    version, current = resolved
+
+    watershed, grids = db.load_snapshot(version)
+    diag = max(watershed.bounds[2] - watershed.bounds[0],
+               watershed.bounds[3] - watershed.bounds[1])
+    eps = diag * settings.point_eps_rel
+
+    outcome = reconcile_stations(
+        [(s.station_id, s.x, s.y) for s in req.left],
+        [(s.station_id, s.x, s.y) for s in req.right],
+        watershed,
+        grids,
+        req.radius,
+        eps,
+    )
+
+    return ReconcileResponse(
+        version=version,
+        is_current=(version == current),
+        radius=req.radius,
+        **outcome,
+    )

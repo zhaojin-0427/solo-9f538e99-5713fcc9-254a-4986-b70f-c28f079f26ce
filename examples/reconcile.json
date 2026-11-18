@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "radius": 2,
+  "left": [
+    {"station_id": "L-001", "x": 1, "y": 1},
+    {"station_id": "L-002", "x": 1, "y": 3}
+  ],
+  "right": [
+    {"station_id": "R-101", "x": 1, "y": 2},
+    {"station_id": "R-102", "x": 3, "y": 1}
+  ]
+}
